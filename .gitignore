@@ -2,3 +2,4 @@ node_modules/
 dist/
 dumps/
 *.tsbuildinfo
+.DS_Store
