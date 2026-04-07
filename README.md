@@ -36,12 +36,20 @@ When multiple workers share the same `WebAssembly.Memory` via `SharedArrayBuffer
 
 ## Installation
 
+### From npm (recommended)
+
+```bash
+npm install -g mnemon
+```
+
+### From source
+
 ```bash
 npm install
 npm run build
 ```
 
-Requires Node.js 20+ and a Chromium-based browser.
+Requires Node.js 22+ and a Chromium-based browser.
 
 ---
 

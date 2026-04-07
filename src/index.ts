@@ -18,13 +18,52 @@ import {
   SECTION_RAWPAGES,
 } from "./writer/format.js";
 
+const PKG_VERSION = "1.1.0";
+
+const USAGE = `
+mnemon v${PKG_VERSION} — WebAssembly linear memory capture tool
+
+USAGE
+  mnemon --url <url> [options]       Launch headless Chromium and capture
+  mnemon --port <n> [options]        Attach to a running Chrome instance
+
+OPTIONS
+  --url <url>          Target URL (required in launch mode)
+  --port <n>           Remote debugging port; enables attach mode
+  --duration <s>       Capture duration in seconds          (default: 60)
+  --interval <ms>      Snapshot interval in milliseconds    (default: 1000)
+  --modules <list>     Comma-separated extractors to enable (default: entropy,strings,timeline,metadata)
+                       Available: entropy, strings, timeline, metadata, rawpages
+  -o <path>            Output file path                     (default: ./session.mnem)
+                       .mnem extension is added automatically if omitted
+  --version, -v        Print version and exit
+  --help,    -h        Print this help and exit
+
+EXAMPLES
+  mnemon --url https://example.com --duration 120 --interval 500
+  mnemon --port 9222 --duration 60 -o captures/earth-test
+  mnemon --url https://example.com --modules entropy,timeline
+  mnemon --url https://example.com --modules entropy,strings,timeline,metadata,rawpages
+`.trimStart();
+
 const args = process.argv.slice(2);
+
+if (args.includes("--help") || args.includes("-h")) {
+  process.stdout.write(USAGE);
+  process.exit(0);
+}
+
+if (args.includes("--version") || args.includes("-v")) {
+  process.stdout.write(`mnemon ${PKG_VERSION}\n`);
+  process.exit(0);
+}
 
 function getArg(name: string, fallback?: string): string {
   const index = args.indexOf(`--${name}`);
   if (index === -1 || index + 1 >= args.length) {
     if (fallback !== undefined) return fallback;
     console.error(`[mnemon] Missing required argument: --${name}`);
+    console.error(`[mnemon] Run \`mnemon --help\` for usage.`);
     process.exit(1);
   }
   return args[index + 1]!;
@@ -34,8 +73,17 @@ function hasFlag(name: string): boolean {
   return args.includes(`--${name}`);
 }
 
-const duration = Number(getArg("duration", "60")) * 1000;
-const interval = Number(getArg("interval", "1000"));
+function parsePositiveNumber(raw: string, argName: string): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`[mnemon] --${argName} must be a positive number (got: ${raw})`);
+    process.exit(1);
+  }
+  return n;
+}
+
+const duration = parsePositiveNumber(getArg("duration", "60"), "duration") * 1000;
+const interval = parsePositiveNumber(getArg("interval", "1000"), "interval");
 const modules = getArg("modules", "entropy,strings,timeline,metadata")
   .split(",")
   .map((s) => s.trim())
