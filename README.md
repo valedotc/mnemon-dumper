@@ -1,6 +1,6 @@
 # mnemon
 
-WebAssembly linear memory capture tool for security research. Hooks WASM instantiation in a browser session, periodically snapshots the linear memory of every running WASM instance, and writes the results to a single binary `.mnemon` file for offline analysis.
+WebAssembly linear memory capture tool for security research. Hooks WASM instantiation in a browser session, periodically snapshots the linear memory of every running WASM instance, and writes the results to a single binary `.mnem` file for offline analysis.
 
 Mnemon is a **data collection tool only** — it does not classify, detect, or interpret what it captures.
 
@@ -90,7 +90,7 @@ node dist/index.js --port 9222 [options]
 | `--duration <s>`   | `60`                                | Capture duration in seconds                                                               |
 | `--interval <ms>`  | `1000`                              | Snapshot interval in milliseconds                                                         |
 | `--modules <list>` | `entropy,strings,timeline,metadata` | Comma-separated list of extractors to enable. Add `rawpages` to also store raw page bytes |
-| `-o <path>`        | `./session.mnemon`                  | Output file path. `.mnemon` extension is added automatically if omitted                   |
+| `-o <path>`        | `./session.mnem`                    | Output file path. `.mnem` extension is added automatically if omitted                     |
 
 ### Examples
 
@@ -112,7 +112,7 @@ node dist/index.js --url https://example.com --modules entropy,strings,timeline,
 
 ## Output format
 
-Every run produces a single `.mnemon` binary file. The default path is `./session.mnemon`; use `-o` to override.
+Every run produces a single `.mnem` binary file. The default path is `./session.mnem`; use `-o` to override.
 
 ### File layout
 
@@ -254,7 +254,7 @@ src/
     rawpages.ts         — Optional raw page dump
   writer/
     format.ts           — Magic, version, section ID constants, header layout
-    mnemon-writer.ts    — Seek-back binary writer for .mnemon files
+    mnemon-writer.ts    — Seek-back binary writer for .mnem files
 ```
 
 ---
