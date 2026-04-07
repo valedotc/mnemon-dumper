@@ -15,7 +15,7 @@ export interface SectionData {
 }
 
 /**
- * Writes a .mnemon binary file to the given filepath.
+ * Writes a .mnem binary file to the given filepath.
  *
  * Writing order:
  *   1. 16 zero bytes — placeholder header (position 0)
@@ -40,10 +40,18 @@ export async function writeMnemonFile(
     await fh.write(Buffer.alloc(HEADER_SIZE), 0, HEADER_SIZE, null);
 
     // 2. Section data blocks
-    const tableEntries: Array<{ sectionId: number; offset: number; size: number }> = [];
+    const tableEntries: Array<{
+      sectionId: number;
+      offset: number;
+      size: number;
+    }> = [];
     let pos = HEADER_SIZE;
     for (const s of sections) {
-      tableEntries.push({ sectionId: s.sectionId, offset: pos, size: s.data.length });
+      tableEntries.push({
+        sectionId: s.sectionId,
+        offset: pos,
+        size: s.data.length,
+      });
       await fh.write(s.data, 0, s.data.length, null);
       pos += s.data.length;
     }

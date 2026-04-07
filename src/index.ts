@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // index.ts
 
 import { extname } from "node:path";
@@ -85,16 +86,16 @@ for (const mod of modules) {
 }
 
 // ── Resolve output filepath ───────────────────────────────────────────────────
-// -o <path>  explicit path; .mnemon extension added if omitted
-// (default)  ./session.mnemon
+// -o <path>  explicit path; .mnem extension added if omitted
+// (default)  ./session.mnem
 
 function resolveOutputPath(): string {
   const idx = args.indexOf("-o");
   if (idx !== -1 && idx + 1 < args.length) {
     const raw = args[idx + 1]!;
-    return extname(raw) === "" ? `${raw}.mnemon` : raw;
+    return extname(raw) === "" ? `${raw}.mnem` : raw;
   }
-  return "./session.mnemon";
+  return "./session.mnem";
 }
 
 const outputPath = resolveOutputPath();

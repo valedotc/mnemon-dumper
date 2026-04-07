@@ -18,12 +18,11 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          registry-url: https://registry.npmjs.org
 
-      # Build to verify the tag compiles cleanly
       - run: npm ci
       - run: npm run build
 
-      # Archive source (dist is built by the user after install)
       - name: Create release archive
         run: |
           tar -czf mnemon-${{ github.ref_name }}.tar.gz \
@@ -38,3 +37,8 @@ jobs:
         with:
           files: mnemon-${{ github.ref_name }}.tar.gz
           generate_release_notes: true
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -1,12 +1,23 @@
 {
-  "name": "mnemon-dumper",
-  "version": "0.1.0",
+  "name": "mnemon",
+  "version": "1.0.0",
   "description": "WebAssembly linear memory snapshot tool",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "mnemon": "dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
   },
   "author": "Valerio Cancemi",
   "license": "MIT",
