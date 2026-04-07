@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // index.ts
 
 import { extname } from "node:path";
