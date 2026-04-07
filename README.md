@@ -83,14 +83,14 @@ node dist/index.js --port 9222 [options]
 
 ### Options
 
-| Flag | Default | Description |
-|---|---|---|
-| `--url <url>` | *(required in launch mode)* | Target URL |
-| `--port <n>` | — | Remote debugging port; enables attach mode |
-| `--duration <s>` | `60` | Capture duration in seconds |
-| `--interval <ms>` | `1000` | Snapshot interval in milliseconds |
+| Flag               | Default                             | Description                                                                               |
+| ------------------ | ----------------------------------- | ----------------------------------------------------------------------------------------- |
+| `--url <url>`      | _(required in launch mode)_         | Target URL                                                                                |
+| `--port <n>`       | —                                   | Remote debugging port; enables attach mode                                                |
+| `--duration <s>`   | `60`                                | Capture duration in seconds                                                               |
+| `--interval <ms>`  | `1000`                              | Snapshot interval in milliseconds                                                         |
 | `--modules <list>` | `entropy,strings,timeline,metadata` | Comma-separated list of extractors to enable. Add `rawpages` to also store raw page bytes |
-| `-o <path>` | `dumps/session.mnemon` | Output file path. `.mnemon` extension is added automatically if omitted |
+| `-o <path>`        | `./session.mnemon`                  | Output file path. `.mnemon` extension is added automatically if omitted                   |
 
 ### Examples
 
@@ -112,7 +112,7 @@ node dist/index.js --url https://example.com --modules entropy,strings,timeline,
 
 ## Output format
 
-Every run produces a single `.mnemon` binary file. The default path is `dumps/session.mnemon`; use `-o` to override.
+Every run produces a single `.mnemon` binary file. The default path is `./session.mnemon`; use `-o` to override.
 
 ### File layout
 
@@ -126,21 +126,21 @@ All integers are **little-endian**.
 
 #### Header (16 bytes)
 
-| Offset | Size | Field | Value |
-|---|---|---|---|
-| 0 | 4 | magic | `4D 4E 45 4D` ("MNEM") |
-| 4 | 2 | version | `1` |
-| 6 | 2 | sectionCount | number of sections |
-| 8 | 4 | sectionTableOffset | absolute byte offset of the section table |
-| 12 | 4 | reserved | `0` |
+| Offset | Size | Field              | Value                                     |
+| ------ | ---- | ------------------ | ----------------------------------------- |
+| 0      | 4    | magic              | `4D 4E 45 4D` ("MNEM")                    |
+| 4      | 2    | version            | `1`                                       |
+| 6      | 2    | sectionCount       | number of sections                        |
+| 8      | 4    | sectionTableOffset | absolute byte offset of the section table |
+| 12     | 4    | reserved           | `0`                                       |
 
 #### Section table entry (12 bytes each, at `sectionTableOffset`)
 
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 4 | sectionId (uint32) |
-| 4 | 4 | dataOffset — absolute offset of section data in file |
-| 8 | 4 | dataSize — byte length of section data |
+| Offset | Size | Field                                                |
+| ------ | ---- | ---------------------------------------------------- |
+| 0      | 4    | sectionId (uint32)                                   |
+| 4      | 4    | dataOffset — absolute offset of section data in file |
+| 8      | 4    | dataSize — byte length of section data               |
 
 To read a specific section: parse the 16-byte header → seek to `sectionTableOffset` → iterate entries to find the desired `sectionId` → seek to `dataOffset`.
 
@@ -219,7 +219,7 @@ per tick:
 
 `totalByteLength` grows when the WASM module calls `memory.grow()`.
 
-### 0x05 — RAWPAGES *(opt-in)*
+### 0x05 — RAWPAGES _(opt-in)_
 
 Raw page bytes for every received chunk. Only enabled when `rawpages` is in `--modules`. Each chunk is exactly 65536 bytes per the WASM page spec; a warning is emitted and the chunk skipped if this invariant is violated.
 
@@ -261,9 +261,9 @@ src/
 
 ## Known limits
 
-| Limit | Detail |
-|---|---|
-| CDP batch size | 32 pages (~2 MB base64) per message. Larger memories produce multiple messages per tick; the dispatcher reassembles them before dispatch. |
-| Batch loss | If a CDP message is dropped (rare on loopback), that entire tick is silently discarded. Subsequent ticks are unaffected. |
-| `memoryOffset` in STRINGS | `uint32` — addresses up to 4 GB, sufficient for current WASM linear memory limits. |
-| Pending batch leak | If not all batches for a tick arrive (e.g. context torn down mid-tick), the partial entry stays in the dispatcher's pending map for the rest of the session. |
+| Limit                     | Detail                                                                                                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| CDP batch size            | 32 pages (~2 MB base64) per message. Larger memories produce multiple messages per tick; the dispatcher reassembles them before dispatch.                    |
+| Batch loss                | If a CDP message is dropped (rare on loopback), that entire tick is silently discarded. Subsequent ticks are unaffected.                                     |
+| `memoryOffset` in STRINGS | `uint32` — addresses up to 4 GB, sufficient for current WASM linear memory limits.                                                                           |
+| Pending batch leak        | If not all batches for a tick arrive (e.g. context torn down mid-tick), the partial entry stays in the dispatcher's pending map for the rest of the session. |
