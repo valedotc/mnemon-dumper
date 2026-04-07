@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Build to verify the tag compiles cleanly
+      - run: npm ci
+      - run: npm run build
+
+      # Archive source (dist is built by the user after install)
+      - name: Create release archive
+        run: |
+          tar -czf mnemon-${{ github.ref_name }}.tar.gz \
+            src/ \
+            package.json \
+            package-lock.json \
+            tsconfig.json \
+            README.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mnemon-${{ github.ref_name }}.tar.gz
+          generate_release_notes: true
