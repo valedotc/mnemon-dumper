@@ -18,7 +18,7 @@ import {
   SECTION_RAWPAGES,
 } from "./writer/format.js";
 
-const PKG_VERSION = "1.1.0";
+const PKG_VERSION = "1.1.1";
 
 const USAGE = `
 mnemon v${PKG_VERSION} — WebAssembly linear memory capture tool
