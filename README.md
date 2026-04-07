@@ -1,46 +1,65 @@
-# mnemon-dumper
+# mnemon
 
-WebAssembly linear memory snapshot tool for security research. Captures, diffs, and analyzes the WASM heap of any browser application over time — designed for cryptojacking detection, forensic memory analysis, and behavioral fingerprinting of WASM-based applications.
+WebAssembly linear memory capture tool for security research. Hooks WASM instantiation in a browser session, periodically snapshots the linear memory of every running WASM instance, and writes the results to a single binary `.mnemon` file for offline analysis.
+
+Mnemon is a **data collection tool only** — it does not classify, detect, or interpret what it captures.
+
+---
 
 ## How it works
 
-The tool injects a JavaScript hook into every execution context of a browser session (main page, Web Workers, Service Workers) by patching the three WASM instantiation APIs before any application code runs:
+A JavaScript hook is injected into every execution context of the browser session — the main page, all dedicated Web Workers, and Service Workers — **before any application script runs**. The hook patches three WASM APIs:
 
 - `WebAssembly.instantiate`
 - `WebAssembly.instantiateStreaming`
 - `new WebAssembly.Instance()`
 
-Once a `WebAssembly.Memory` object is found, a periodic timer scans the linear memory buffer at the configured interval. Memory is divided into 64 KB pages (the native WASM page size). On each tick:
+Once a `WebAssembly.Memory` is found, a periodic timer (`setInterval`) scans the linear memory buffer at the configured interval. Memory is divided into 64 KB pages (the native WASM page size). On each tick:
 
-1. An XOR checksum is computed over each page using `Uint32Array` (4× faster than byte-by-byte).
-2. Pages whose checksum changed since the previous tick are collected as **chunks** `{ offset, data }` where `data` is the raw page bytes encoded in base64.
-3. The chunks are sent to Node.js via a Chrome DevTools Protocol (CDP) runtime binding (`saveSnapshot`), bypassing the DOM entirely.
-4. Node.js decodes, writes, and analyzes each snapshot on disk.
+1. An XOR checksum is computed over every page via `Uint32Array` (4× faster than byte-by-byte).
+2. The **first tick** (seq 0) is a **base**: all pages with a non-zero checksum are included. Zero pages are copy-on-write and carry no data.
+3. All **subsequent ticks** are **deltas**: only pages whose checksum changed since the previous tick are included.
+4. Changed pages are base64-encoded and sent to Node.js via a Chrome DevTools Protocol binding (`saveSnapshot`), bypassing the DOM entirely.
+5. A second binding (`saveMetadata`) fires once per WASM instance at instantiation time and carries the module's export/import table and memory descriptor.
 
-The first snapshot from a given memory instance is a **base**: all non-zero pages are included (zero pages are copy-on-write and contain no information). Subsequent snapshots are **deltas**: only pages that changed since the last tick. This sparse+delta format keeps disk usage proportional to actual memory activity, not total allocation size.
+Because large memories would exceed CDP message limits, the hook splits each tick's data into batches of 32 pages (~2 MB of base64 each). The Node.js dispatcher reassembles all batches for a tick before forwarding to the extractors.
 
-### Shared memory deduplication
+### Worker timing
 
-When multiple Web Workers share the same `WebAssembly.Memory` via `SharedArrayBuffer`, every worker produces identical snapshots. mnemon-dumper deduplicates both base and delta snapshots using a fingerprint (`type:totalByteLength:chunkCount:first32bytes`), so shared memory is recorded only once regardless of worker count.
+Workers are paused at startup via `Target.setAutoAttach` with `waitForDebuggerOnStart: true`. The hook is injected before the worker script executes; `Runtime.runIfWaitingForDebugger` resumes it afterward. This guarantees the WASM API patches are in place before any `WebAssembly.instantiate` call.
+
+### SharedArrayBuffer deduplication
+
+When multiple workers share the same `WebAssembly.Memory` via `SharedArrayBuffer`, every worker emits identical snapshots. Mnemon deduplicates on a fingerprint `type:totalByteLength:chunkCount:first32bytes`, so shared memory is recorded exactly once.
 
 ---
 
-## Modes
+## Installation
+
+```bash
+npm install
+npm run build
+```
+
+Requires Node.js 20+ and a Chromium-based browser.
+
+---
+
+## Usage
 
 ### Launch mode
 
-Opens a headless Chromium instance, navigates to the target URL, and captures for the configured duration.
+Opens a headless Chromium, navigates to the URL, captures for the given duration, then exits.
 
 ```bash
-npm run build
-node dist/index.js --url https://example.com --duration 60 --interval 1000
+node dist/index.js --url https://example.com [options]
 ```
 
 ### Attach mode
 
-Connects to an already-running Chrome instance via remote debugging. The browser stays open after the session ends, so you can browse normally while mnemon captures in the background.
+Connects to a running Chrome instance via remote debugging. The browser stays open after the session ends.
 
-Start Chrome with remote debugging enabled (a separate `--user-data-dir` is required):
+Start Chrome with a dedicated profile (required — Chrome refuses remote debugging on the default profile):
 
 ```bash
 # macOS
@@ -56,233 +75,195 @@ google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-debug
 chrome.exe --remote-debugging-port=9222 --user-data-dir=%TEMP%\chrome-debug
 ```
 
-Then run:
+Then:
 
 ```bash
-node dist/index.js --port 9222 --duration 60 --interval 1000
+node dist/index.js --port 9222 [options]
 ```
 
-In attach mode, mnemon hooks all tabs already open and every new tab the user opens during the session.
+### Options
 
-### CLI arguments
-
-| Argument | Default | Description |
+| Flag | Default | Description |
 |---|---|---|
 | `--url <url>` | *(required in launch mode)* | Target URL |
-| `--port <n>` | — | Remote debugging port (enables attach mode) |
-| `--duration <seconds>` | `60` | How long to capture |
-| `--interval <ms>` | `1000` | Snapshot interval |
-| `--max-memory-mb <n>` | `64` | Maximum non-zero bytes to transfer per snapshot tick (cap to avoid CDP message size limits) |
+| `--port <n>` | — | Remote debugging port; enables attach mode |
+| `--duration <s>` | `60` | Capture duration in seconds |
+| `--interval <ms>` | `1000` | Snapshot interval in milliseconds |
+| `--modules <list>` | `entropy,strings,timeline,metadata` | Comma-separated list of extractors to enable. Add `rawpages` to also store raw page bytes |
+| `-o <path>` | `dumps/session.mnemon` | Output file path. `.mnemon` extension is added automatically if omitted |
 
----
-
-## Output structure
-
-Each run produces a session directory under `dumps/` named by timestamp:
-
-```
-dumps/
-└── 2026-03-28_185055/
-    ├── meta.json
-    ├── analysis.json
-    ├── strings.txt
-    ├── snapshot_00000_base.bin
-    ├── snapshot_00000_base.map.json
-    ├── snapshot_00001_delta.bin
-    ├── snapshot_00001_delta.map.json
-    └── ...
-```
-
----
-
-### `meta.json`
-
-Raw session index. Contains the full snapshot list with all per-snapshot metadata as recorded during capture.
-
-```json
-{
-  "url": "https://example.com",
-  "interval": 1000,
-  "startTime": "2026-03-28T18:50:55.551Z",
-  "snapshots": [
-    {
-      "seq": 0,
-      "timestamp": 1774723873530,
-      "type": "base",
-      "totalMemoryMB": 32,
-      "changedChunks": 12,
-      "byteLength": 786432,
-      "strings": ["stratum+tcp://pool.example.com:3333", "..."],
-      "highEntropyRegions": [
-        { "offset": 2097152, "entropy": 7.94 }
-      ],
-      "binFile": "snapshot_00000_base.bin",
-      "mapFile": "snapshot_00000_base.map.json"
-    }
-  ]
-}
-```
-
-Fields per snapshot entry:
-
-| Field | Description |
-|---|---|
-| `seq` | Global sequence number for this session |
-| `timestamp` | Unix millisecond timestamp from inside the browser |
-| `type` | `"base"` (first snapshot, all non-zero pages) or `"delta"` (only changed pages) |
-| `totalMemoryMB` | Total WASM linear memory size in MB at capture time |
-| `changedChunks` | Number of 64 KB pages included in this snapshot |
-| `byteLength` | Total bytes transferred in this snapshot (changedChunks × up to 65536) |
-| `strings` | Security-filtered strings found in memory (URLs and readable phrases — see below) |
-| `highEntropyRegions` | Chunks with Shannon entropy > 7.0 bits/byte, with their memory offset |
-| `binFile` | Filename of the flat binary for this snapshot |
-| `mapFile` | Filename of the offset map for this snapshot |
-
----
-
-### `analysis.json`
-
-Analyst-facing aggregated summary built from all snapshots in the session. This is the primary file for behavioral analysis.
-
-```json
-{
-  "url": "https://example.com",
-  "interval": 1000,
-  "startTime": "2026-03-28T18:50:55.551Z",
-  "snapshotCount": 20,
-  "strings": [ ... ],
-  "hotHighEntropyPages": [ ... ],
-  "timeline": [ ... ]
-}
-```
-
-#### `strings`
-
-All security-relevant strings found in WASM memory across the entire session, annotated with when they first appeared. A string qualifies as security-relevant if it is:
-
-- A **URL**: contains `://` (covers `stratum+tcp://`, `https://`, `wss://`, etc.)
-- **Human-readable**: at least 20 characters, contains a space, contains at least one letter (filters binary noise and short hex sequences)
-
-Sorted by most recently first-seen (new strings appearing late in the session are often the most interesting).
-
-```json
-"strings": [
-  {
-    "string": "stratum+tcp://pool.minexmr.com:4444",
-    "firstSeenSeq": 3,
-    "timestamp": 1774723876186
-  },
-  {
-    "string": "4BGGo3R1dNFhVS3wEqwwkaPyZ5AdmncvJRbYVFXh5T7msdWRzgFG1gVFkW8zXfMiYkMK",
-    "firstSeenSeq": 3,
-    "timestamp": 1774723876186
-  }
-]
-```
-
-#### `hotHighEntropyPages`
-
-Memory pages (64 KB chunks) with Shannon entropy consistently above 7.0 bits/byte across more than half of all snapshots. Entropy above 7.5 bits/byte strongly suggests active cryptographic computation (hash state, work buffers, RNG output). Pages that appear once and disappear are excluded — only pages that remain hot throughout the session are listed.
-
-```json
-"hotHighEntropyPages": [
-  {
-    "offset": 2097152,
-    "hexOffset": "0x200000",
-    "appearedInSnapshots": 18,
-    "avgEntropy": "7.923"
-  }
-]
-```
-
-| Field | Description |
-|---|---|
-| `offset` | Byte offset in WASM linear memory |
-| `hexOffset` | Same offset in hex (easier to match against WASM source maps) |
-| `appearedInSnapshots` | How many snapshots included this page as a high-entropy region |
-| `avgEntropy` | Average Shannon entropy across all snapshots where it appeared (bits/byte, max 8.0) |
-
-#### `timeline`
-
-Per-snapshot summary for behavioral analysis. This is the most important section for cryptojacking detection: a legitimate application shows activity that decays to zero as it finishes loading, while a miner maintains a flat non-zero baseline indefinitely.
-
-```json
-"timeline": [
-  { "seq": 0,  "timestamp": 1774723873530, "type": "base",  "changedChunks": 459, "bytesMB": "28.69", "hotChunks": 7, "newStrings": 312 },
-  { "seq": 1,  "timestamp": 1774723876186, "type": "delta", "changedChunks": 115, "bytesMB": "7.19",  "hotChunks": 2, "newStrings": 84  },
-  { "seq": 2,  "timestamp": 1774723879213, "type": "delta", "changedChunks": 129, "bytesMB": "8.06",  "hotChunks": 1, "newStrings": 5   },
-  { "seq": 8,  "timestamp": 1774723885024, "type": "delta", "changedChunks": 0,   "bytesMB": "0.00",  "hotChunks": 0, "newStrings": 0   },
-  { "seq": 9,  "timestamp": 1774723888000, "type": "delta", "changedChunks": 0,   "bytesMB": "0.00",  "hotChunks": 0, "newStrings": 0   }
-]
-```
-
-| Field | Description |
-|---|---|
-| `seq` | Snapshot sequence number |
-| `timestamp` | Unix ms timestamp |
-| `type` | `"base"` or `"delta"` |
-| `changedChunks` | Number of 64 KB pages that changed since the previous tick |
-| `bytesMB` | Total bytes in this snapshot in MB |
-| `hotChunks` | Number of chunks with entropy > 7.0 in this snapshot |
-| `newStrings` | Number of security strings seen for the **first time** in this snapshot (not repeated from earlier snapshots) |
-
----
-
-### `strings.txt`
-
-All raw printable ASCII strings (≥ 8 characters) found in WASM memory across the entire session, one per line, sorted by length descending. This is the unfiltered companion to the `strings` section of `analysis.json` and is intended for manual grep-based investigation.
+### Examples
 
 ```bash
-# Search for mining pool indicators
-grep -iE "stratum|pool\.|mining|xmr|monero" dumps/SESSION/strings.txt
+# 2-minute capture of a target site, 500 ms interval
+node dist/index.js --url https://example.com --duration 120 --interval 500
 
-# Search for Ethereum wallet addresses
-grep -E "0x[0-9a-fA-F]{40}" dumps/SESSION/strings.txt
+# Attach to a running browser, save to a named file
+node dist/index.js --port 9222 --duration 60 -o captures/earth-test
 
-# Search for Monero wallet addresses (95-char base58)
-grep -E "[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]{95}" dumps/SESSION/strings.txt
+# Capture only timeline and entropy, no strings
+node dist/index.js --url https://example.com --modules entropy,timeline
+
+# Include raw page bytes (large output)
+node dist/index.js --url https://example.com --modules entropy,strings,timeline,metadata,rawpages
 ```
 
 ---
 
-### `snapshot_NNNNN_<type>.bin`
+## Output format
 
-Flat binary file containing the raw bytes of the changed pages, concatenated in the order they appear in the corresponding `.map.json`. To reconstruct the original address space, use the map file to place each chunk at its correct offset.
+Every run produces a single `.mnemon` binary file. The default path is `dumps/session.mnemon`; use `-o` to override.
 
-This file is the source material for:
-- Binary diffing between snapshots (e.g. with `radiff2` or `vbindiff`)
-- Pattern matching for known algorithm signatures (RandomX scratchpad, CryptoNight hash state)
-- Entropy visualization per region
+### File layout
 
-### `snapshot_NNNNN_<type>.map.json`
-
-Offset map for the corresponding `.bin` file. Maps each consecutive chunk in the binary to its original byte offset in WASM linear memory.
-
-```json
-{
-  "totalByteLength": 536870912,
-  "chunks": [
-    { "offset": 65536,   "size": 65536 },
-    { "offset": 196608,  "size": 65536 },
-    { "offset": 4259840, "size": 65536 }
-  ]
-}
+```
+[header         — 16 bytes      ]
+[section data   — variable      ]  ← one block per active extractor
+[section table  — 12 bytes × N  ]  ← at sectionTableOffset
 ```
 
-`totalByteLength` is the full size of the WASM linear memory at capture time (including unallocated/zero pages that were not transferred). The chunks array contains only the pages that were actually captured.
+All integers are **little-endian**.
 
----
+#### Header (16 bytes)
 
-## Cryptojacking detection
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| 0 | 4 | magic | `4D 4E 45 4D` ("MNEM") |
+| 4 | 2 | version | `1` |
+| 6 | 2 | sectionCount | number of sections |
+| 8 | 4 | sectionTableOffset | absolute byte offset of the section table |
+| 12 | 4 | reserved | `0` |
 
-The behavioral signature of a WASM cryptominer is distinct from any legitimate application:
+#### Section table entry (12 bytes each, at `sectionTableOffset`)
 
-| Signal | Legitimate app | Cryptominer |
+| Offset | Size | Field |
 |---|---|---|
-| `changedChunks` over time | Decays to 0 after loading | Never reaches 0, stable 1–20/tick |
-| `hotChunks` (entropy > 7.0) | Transient, only during computation | Persistent throughout the session |
-| `newStrings` | Concentrated in early snapshots | May appear mid-session (pool reconnect, wallet rotation) |
-| `strings` content | API endpoints, feature flags, shader source | `stratum://`, pool hostnames, wallet addresses |
-| `hotHighEntropyPages` offsets | Vary, no fixed pattern | Fixed offsets (algorithm scratchpad has a known size and alignment) |
+| 0 | 4 | sectionId (uint32) |
+| 4 | 4 | dataOffset — absolute offset of section data in file |
+| 8 | 4 | dataSize — byte length of section data |
 
-A session where `changedChunks` never drops to zero, `hotChunks` remains non-zero across every delta, and `strings.txt` contains a `stratum` URL is a strong positive signal for in-browser mining.
+To read a specific section: parse the 16-byte header → seek to `sectionTableOffset` → iterate entries to find the desired `sectionId` → seek to `dataOffset`.
+
+---
+
+## Sections
+
+### 0x01 — METADATA
+
+Captured once per WASM instance at instantiation time, plus session-level info written at finalization.
+
+```
+urlLen:         uint16
+url:            utf8[urlLen]
+startTimestamp: uint64   ms epoch
+endTimestamp:   uint64   ms epoch
+instanceCount:  uint32
+
+per instance:
+  exportCount:  uint32
+  per export:   nameLen (uint16) + utf8[nameLen]
+  importCount:  uint32
+  per import:   nameLen (uint16) + utf8[nameLen]   ← "module.name" format
+  initialPages: int32   (-1 if unavailable)
+  maxPages:     int32   (-1 if unavailable)
+```
+
+### 0x02 — ENTROPY
+
+Shannon entropy (bits/byte) computed per received chunk. 0.0 = all identical bytes; 8.0 = uniform random.
+
+```
+snapshotCount: uint32
+
+per snapshot:
+  seq:       uint32
+  timestamp: uint64   ms epoch
+  pageCount: uint32   number of pages in this tick
+
+  per page:
+    offset:  uint32   byte offset in linear memory
+    entropy: float32
+```
+
+Only chunks actually transferred (changed/non-zero pages) have entropy entries. Entropy is not computed for zero pages.
+
+### 0x03 — STRINGS
+
+All printable ASCII sequences ≥ 8 consecutive characters (bytes 0x20–0x7E) found in received chunks. Only the first occurrence of each unique string is recorded.
+
+```
+stringCount:    uint32
+
+per string:
+  firstSeenSeq: uint32   seq of the snapshot where this string first appeared
+  memoryOffset: uint32   absolute byte offset in linear memory at firstSeenSeq
+  length:       uint16   byte length of the UTF-8 value
+  value:        utf8[length]
+```
+
+`memoryOffset` is `chunkBaseOffset + positionWithinChunk`.
+
+### 0x04 — TIMELINE
+
+One record per snapshot tick, including ticks with zero changed pages (idle deltas).
+
+```
+tickCount:      uint32
+
+per tick:
+  seq:             uint32
+  timestamp:       uint64   ms epoch
+  changedPages:    uint32   number of chunks transferred in this tick
+  totalByteLength: uint32   total linear memory size at this tick
+```
+
+`totalByteLength` grows when the WASM module calls `memory.grow()`.
+
+### 0x05 — RAWPAGES *(opt-in)*
+
+Raw page bytes for every received chunk. Only enabled when `rawpages` is in `--modules`. Each chunk is exactly 65536 bytes per the WASM page spec; a warning is emitted and the chunk skipped if this invariant is violated.
+
+```
+snapshotCount: uint32
+
+per snapshot:
+  seq:        uint32
+  chunkCount: uint32
+
+  per chunk:
+    offset:   uint32
+    data:     bytes[65536]
+```
+
+---
+
+## Project structure
+
+```
+src/
+  index.ts              — CLI parsing, extractor wiring, session orchestration
+  browser.ts            — Puppeteer launch/attach, CDP setup, hook injection
+  hook.ts               — Browser-side JS: WASM API patching, periodic scanning
+  dispatcher.ts         — CDP payload decoding, batch reassembly, dedup, fan-out
+  extractors/
+    types.ts            — Shared Snapshot and Extractor interfaces
+    entropy.ts          — Shannon entropy per page
+    strings.ts          — ASCII string extraction, first-seen tracking
+    timeline.ts         — Per-tick change summary
+    metadata.ts         — Module exports/imports, session URL and timestamps
+    rawpages.ts         — Optional raw page dump
+  writer/
+    format.ts           — Magic, version, section ID constants, header layout
+    mnemon-writer.ts    — Seek-back binary writer for .mnemon files
+```
+
+---
+
+## Known limits
+
+| Limit | Detail |
+|---|---|
+| CDP batch size | 32 pages (~2 MB base64) per message. Larger memories produce multiple messages per tick; the dispatcher reassembles them before dispatch. |
+| Batch loss | If a CDP message is dropped (rare on loopback), that entire tick is silently discarded. Subsequent ticks are unaffected. |
+| `memoryOffset` in STRINGS | `uint32` — addresses up to 4 GB, sufficient for current WASM linear memory limits. |
+| Pending batch leak | If not all batches for a tick arrive (e.g. context torn down mid-tick), the partial entry stays in the dispatcher's pending map for the rest of the session. |

@@ -4,22 +4,20 @@ import { get as httpGet } from "node:http";
 import puppeteer, { TargetType } from "puppeteer";
 import type { Browser, CDPSession, Page, WebWorker, Target } from "puppeteer";
 import { getHookScript } from "./hook.js";
-import { Storage } from "./storage.js";
+import { Dispatcher } from "./dispatcher.js";
 
 export interface SessionConfig {
   url: string;
   duration: number;
   interval: number;
-  maxBytes: number;
-  outputDir: string;
+  dispatcher: Dispatcher;
 }
 
 export interface AttachConfig {
   port: number;
   duration: number;
   interval: number;
-  maxBytes: number;
-  outputDir: string;
+  dispatcher: Dispatcher;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -33,22 +31,20 @@ export interface AttachConfig {
 async function setupContextCDP(
   cdpSession: CDPSession,
   hookScript: string,
-  storage: Storage,
+  dispatcher: Dispatcher,
   label: string,
 ): Promise<void> {
   await cdpSession.send("Runtime.addBinding", { name: "saveSnapshot" });
+  await cdpSession.send("Runtime.addBinding", { name: "saveMetadata" });
   await cdpSession.send("Runtime.enable");
 
-  cdpSession.on("Runtime.bindingCalled", async (event) => {
+  cdpSession.on("Runtime.bindingCalled", (event) => {
     if (event.name === "saveSnapshot") {
-      try {
-        const data = JSON.parse(event.payload);
-        await storage.saveSnapshot(data);
-      } catch {}
+      dispatcher.handleSnapshot(event.payload);
+    } else if (event.name === "saveMetadata") {
+      dispatcher.handleMetadata(event.payload);
     }
   });
-
-
 
   try {
     await cdpSession.send("Runtime.evaluate", { expression: hookScript });
@@ -75,17 +71,27 @@ async function setupContextCDP(
 async function hookPage(
   page: Page,
   hookScript: string,
-  storage: Storage,
+  dispatcher: Dispatcher,
   injectNow: boolean,
 ): Promise<void> {
   const cdp = await page.createCDPSession();
+
+  // Pause dedicated workers on start so the hook is guaranteed to be injected
+  // before any worker script executes (and before WebAssembly.instantiate runs).
+  // setupContextCDP ends with Runtime.runIfWaitingForDebugger to resume them.
+  await cdp.send("Target.setAutoAttach", {
+    autoAttach: true,
+    waitForDebuggerOnStart: true,
+    flatten: true,
+  });
+
   await cdp.send("Runtime.addBinding", { name: "saveSnapshot" });
-  cdp.on("Runtime.bindingCalled", async (event) => {
+  await cdp.send("Runtime.addBinding", { name: "saveMetadata" });
+  cdp.on("Runtime.bindingCalled", (event) => {
     if (event.name === "saveSnapshot") {
-      try {
-        const data = JSON.parse(event.payload);
-        await storage.saveSnapshot(data);
-      } catch {}
+      dispatcher.handleSnapshot(event.payload);
+    } else if (event.name === "saveMetadata") {
+      dispatcher.handleMetadata(event.payload);
     }
   });
 
@@ -93,7 +99,7 @@ async function hookPage(
     const label = `worker ${worker.url().slice(0, 80)}`;
     console.log(`[mnemon] New target: ${label}`);
     try {
-      await setupContextCDP(worker.client, hookScript, storage, label);
+      await setupContextCDP(worker.client, hookScript, dispatcher, label);
     } catch (err) {
       console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
     }
@@ -110,7 +116,7 @@ async function hookPage(
       const label = `worker ${worker.url().slice(0, 80)} [existing]`;
       console.log(`[mnemon] Existing target: ${label}`);
       try {
-        await setupContextCDP(worker.client, hookScript, storage, label);
+        await setupContextCDP(worker.client, hookScript, dispatcher, label);
       } catch (err) {
         console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
       }
@@ -128,7 +134,7 @@ async function hookPage(
 function hookServiceWorkers(
   browser: Browser,
   hookScript: string,
-  storage: Storage,
+  dispatcher: Dispatcher,
   seenUrls: Set<string>,
 ): void {
   browser.on("targetcreated", async (target: Target) => {
@@ -140,7 +146,7 @@ function hookServiceWorkers(
     console.log(`[mnemon] New target: ${label}`);
     try {
       const swCDP = await target.createCDPSession();
-      await setupContextCDP(swCDP, hookScript, storage, label);
+      await setupContextCDP(swCDP, hookScript, dispatcher, label);
     } catch (err) {
       console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
     }
@@ -155,7 +161,7 @@ function hookServiceWorkers(
 async function scanExistingServiceWorkers(
   browser: Browser,
   hookScript: string,
-  storage: Storage,
+  dispatcher: Dispatcher,
   seenUrls: Set<string>,
 ): Promise<void> {
   for (const target of browser.targets()) {
@@ -167,7 +173,7 @@ async function scanExistingServiceWorkers(
     console.log(`[mnemon] Existing target: ${label}`);
     try {
       const swCDP = await target.createCDPSession();
-      await setupContextCDP(swCDP, hookScript, storage, label);
+      await setupContextCDP(swCDP, hookScript, dispatcher, label);
     } catch (err) {
       console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
     }
@@ -184,7 +190,11 @@ function getWsEndpoint(port: number): Promise<string> {
         try {
           const parsed = JSON.parse(body) as { webSocketDebuggerUrl?: string };
           if (!parsed.webSocketDebuggerUrl) {
-            reject(new Error("webSocketDebuggerUrl not found in /json/version response"));
+            reject(
+              new Error(
+                "webSocketDebuggerUrl not found in /json/version response",
+              ),
+            );
           } else {
             resolve(parsed.webSocketDebuggerUrl);
           }
@@ -193,23 +203,25 @@ function getWsEndpoint(port: number): Promise<string> {
         }
       });
     }).on("error", (err) => {
-      reject(new Error(
-        `Could not reach Chrome on port ${port}. ` +
-        `Make sure Chrome is running with remote debugging enabled.\n\n` +
-        `macOS:\n` +
-        `  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\\n` +
-        `    --remote-debugging-port=${port} \\\n` +
-        `    --user-data-dir=/tmp/chrome-debug \\\n` +
-        `    --no-first-run\n\n` +
-        `Note: --user-data-dir is required — Chrome refuses remote debugging\n` +
-        `on the default profile. Any temp directory works.\n\n` +
-        `Original error: ${err.message}`,
-      ));
+      reject(
+        new Error(
+          `Could not reach Chrome on port ${port}. ` +
+            `Make sure Chrome is running with remote debugging enabled.\n\n` +
+            `macOS:\n` +
+            `  /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\\n` +
+            `    --remote-debugging-port=${port} \\\n` +
+            `    --user-data-dir=/tmp/chrome-debug \\\n` +
+            `    --no-first-run\n\n` +
+            `Note: --user-data-dir is required — Chrome refuses remote debugging\n` +
+            `on the default profile. Any temp directory works.\n\n` +
+            `Original error: ${err.message}`,
+        ),
+      );
     });
   });
 }
 
-function makeSessionId(): string {
+export function makeSessionId(): string {
   return new Date()
     .toISOString()
     .slice(0, 19)
@@ -224,26 +236,18 @@ function makeSessionId(): string {
  * captures WASM memory snapshots for the configured duration.
  */
 export async function runSession(config: SessionConfig): Promise<void> {
-  const storage = new Storage(
-    config.outputDir,
-    makeSessionId(),
-    config.url,
-    config.interval,
-  );
-  await storage.init();
-
   const browser = await puppeteer.launch({
     headless: true,
     args: ["--no-sandbox"],
   });
 
-  const hookScript = getHookScript(config.interval, config.maxBytes);
+  const hookScript = getHookScript(config.interval);
   const seenUrls = new Set<string>();
 
-  hookServiceWorkers(browser, hookScript, storage, seenUrls);
+  hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
 
   const page = await browser.newPage();
-  await hookPage(page, hookScript, storage, /* injectNow */ false);
+  await hookPage(page, hookScript, config.dispatcher, /* injectNow */ false);
 
   console.log(`[mnemon] Navigating to ${config.url}`);
   console.log(`[mnemon] Duration: ${config.duration / 1000}s, Interval: ${config.interval}ms`);
@@ -251,15 +255,13 @@ export async function runSession(config: SessionConfig): Promise<void> {
   // waitUntil "load" so service workers registered after DOMContentLoaded
   // are already alive when we do the proactive scan below.
   await page.goto(config.url, { waitUntil: "load", timeout: 60_000 });
-  await scanExistingServiceWorkers(browser, hookScript, storage, seenUrls);
+  await scanExistingServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
 
   await new Promise((resolve) => setTimeout(resolve, config.duration));
 
   // Close the browser first so all worker setIntervals stop and no more
-  // saveSnapshot callbacks can fire after we write meta.json.
+  // binding callbacks can fire after we finalize.
   await browser.close();
-  await storage.finalize();
-  console.log("[mnemon] Done");
 }
 
 /**
@@ -278,19 +280,11 @@ export async function runAttachSession(config: AttachConfig): Promise<void> {
 
   const browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
 
-  const storage = new Storage(
-    config.outputDir,
-    makeSessionId(),
-    `attach:${config.port}`,
-    config.interval,
-  );
-  await storage.init();
-
-  const hookScript = getHookScript(config.interval, config.maxBytes);
+  const hookScript = getHookScript(config.interval);
   const seenUrls = new Set<string>();
 
-  hookServiceWorkers(browser, hookScript, storage, seenUrls);
-  await scanExistingServiceWorkers(browser, hookScript, storage, seenUrls);
+  hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
+  await scanExistingServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
 
   // Hook all pages already open.
   const pages = await browser.pages();
@@ -299,7 +293,7 @@ export async function runAttachSession(config: AttachConfig): Promise<void> {
     const url = page.url();
     if (!url || url === "about:blank") continue;
     console.log(`[mnemon] Hooking page: ${url.slice(0, 80)}`);
-    await hookPage(page, hookScript, storage, /* injectNow */ true);
+    await hookPage(page, hookScript, config.dispatcher, /* injectNow */ true);
   }
 
   // Hook new pages as the user opens them.
@@ -311,7 +305,7 @@ export async function runAttachSession(config: AttachConfig): Promise<void> {
     // evaluateOnNewDocument ensures the hook runs before any page script on
     // subsequent navigations within this tab.
     await newPage.evaluateOnNewDocument(hookScript);
-    await hookPage(newPage, hookScript, storage, /* injectNow */ false);
+    await hookPage(newPage, hookScript, config.dispatcher, /* injectNow */ false);
 
     newPage.on("framenavigated", async (frame) => {
       if (frame !== newPage.mainFrame()) return;
@@ -326,8 +320,6 @@ export async function runAttachSession(config: AttachConfig): Promise<void> {
 
   await new Promise((resolve) => setTimeout(resolve, config.duration));
 
-  await storage.finalize();
   // Disconnect without closing so the user's browser stays open.
   browser.disconnect();
-  console.log("[mnemon] Done");
 }
