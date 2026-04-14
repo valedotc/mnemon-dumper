@@ -2,27 +2,11 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { Dispatcher } from "../dispatcher.js";
 import type { Snapshot } from "../extractors/types.js";
-import type { ActiveExtractor } from "../dispatcher.js";
 import { SILENT } from "../logger.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** Collector extractor — records every snapshot it receives. */
-function makeCollector(): { extractor: ActiveExtractor; received: Snapshot[] } {
-  const received: Snapshot[] = [];
-  const extractor: ActiveExtractor = {
-    sectionId: 0,
-    extractor: {
-      onSnapshot(s: Snapshot) { received.push(s); },
-      finalize() { return Buffer.alloc(0); },
-    },
-  };
-  return { extractor, received };
-}
-
 function makeDispatcher(received: Snapshot[]): Dispatcher {
-  const collector = makeCollector();
-  // Replace the inner received array reference to use the caller's array.
   const dispatcher = new Dispatcher(
     [{
       sectionId: 0,
