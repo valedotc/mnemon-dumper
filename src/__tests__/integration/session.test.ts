@@ -85,7 +85,7 @@ describe("Integration: runSession with real WASM", () => {
       try {
         await runSession({
           url: `http://127.0.0.1:${server.port}/`,
-          duration: 6000,
+          duration: 3000,
           interval: 300,
           dispatcher,
           logger: SILENT,
