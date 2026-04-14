@@ -37,14 +37,17 @@ OPTIONS
                        Available: entropy, strings, timeline, metadata, rawpages
   -o <path>            Output file path                     (default: ./session.mnem)
                        .mnem extension is added automatically if omitted
-  --version, -v        Print version and exit
+  -v                   Verbose: shallow progress (snapshot sizes, worker count)
+  -vv                  More verbose: pipeline tracing (hook steps, fingerprints, batches)
+  -vvv                 Most verbose: raw CDP payloads, chunk lists, importObject shapes
+  --version, -V        Print version and exit
   --help,    -h        Print this help and exit
 
 EXAMPLES
   mnemon --url https://example.com --duration 120 --interval 500
+  mnemon --url https://example.com -vv
   mnemon --port 9222 --duration 60 -o captures/earth-test
   mnemon --url https://example.com --modules entropy,timeline
-  mnemon --url https://example.com --modules entropy,strings,timeline,metadata,rawpages
 `.trimStart();
 
 const args = process.argv.slice(2);
@@ -54,7 +57,7 @@ if (args.includes("--help") || args.includes("-h")) {
   process.exit(0);
 }
 
-if (args.includes("--version") || args.includes("-v")) {
+if (args.includes("--version") || args.includes("-V")) {
   process.stdout.write(`mnemon ${PKG_VERSION}\n`);
   process.exit(0);
 }
@@ -82,6 +85,23 @@ function parsePositiveNumber(raw: string, argName: string): number {
   }
   return n;
 }
+
+/**
+ * Count verbosity level from -v / -vv / -vvv flags.
+ * A single token "-vvv" counts as 3. Repeated "-v -v -v" also counts as 3. Capped at 3.
+ */
+function parseVerbosity(): 0 | 1 | 2 | 3 {
+  let level = 0;
+  for (const arg of args) {
+    if (arg === "-v")   level += 1;
+    if (arg === "-vv")  level += 2;
+    if (arg === "-vvv") level += 3;
+  }
+  return Math.min(level, 3) as 0 | 1 | 2 | 3;
+}
+
+const verbosity = parseVerbosity();
+const logger = new Logger(verbosity);
 
 const duration = parsePositiveNumber(getArg("duration", "60"), "duration") * 1000;
 const interval = parsePositiveNumber(getArg("interval", "1000"), "interval");
@@ -130,7 +150,7 @@ for (const mod of modules) {
       });
       break;
     default:
-      console.warn(`[mnemon] Unknown module: ${mod}`);
+      logger.warn(`Unknown module: ${mod}`);
   }
 }
 
@@ -148,13 +168,12 @@ function resolveOutputPath(): string {
 }
 
 const outputPath = resolveOutputPath();
-const dispatcher = new Dispatcher(activeExtractors, metadataExtractor);
-const logger = new Logger(0);
+const dispatcher = new Dispatcher(activeExtractors, metadataExtractor, logger);
 const startTimestamp = Date.now();
 let sessionUrl = "";
 
-console.log("[mnemon] Starting memory dumper");
-console.log(`[mnemon] Modules: ${modules.join(", ")}`);
+logger.info("Starting memory dumper");
+logger.info(`Modules: ${modules.join(", ")}`);
 
 async function finalize(): Promise<void> {
   if (metadataExtractor) {
@@ -165,52 +184,26 @@ async function finalize(): Promise<void> {
     data: extractor.finalize(),
   }));
   const filepath = await writeMnemonFile(outputPath, sections);
-  console.log(`[mnemon] Session saved to ${filepath}`);
-  console.log("[mnemon] Done");
+  logger.info(`Session saved to ${filepath}`);
+  logger.info("Done");
 }
 
 if (hasFlag("port")) {
-  // ── Attach mode ─────────────────────────────────────────────────────────────
-  // Connect to an already-running Chrome instance.
-  //
-  // IMPORTANT: --user-data-dir is required (Chrome refuses remote debugging
-  // on the default profile as a security measure). Use any temp directory.
-  //
-  //   macOS:
-  //     /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
-  //       --remote-debugging-port=9222 \
-  //       --user-data-dir=/tmp/chrome-debug \
-  //       --no-first-run
-  //
-  //   Linux:
-  //     google-chrome --remote-debugging-port=9222 \
-  //       --user-data-dir=/tmp/chrome-debug
-  //
-  //   Windows:
-  //     chrome.exe --remote-debugging-port=9222 ^
-  //       --user-data-dir=%TEMP%\chrome-debug
-  //
-  // Then run:
-  //   node dist/index.js --port 9222 --duration 60 --interval 1000
   const port = Number(getArg("port", "9222"));
   sessionUrl = `attach:${port}`;
   runAttachSession({ port, duration, interval, dispatcher, logger })
     .then(finalize)
     .catch((err: unknown) => {
-      console.error("[mnemon] Error:", (err as Error).message);
+      logger.error(`Error: ${(err as Error).message}`);
       process.exit(1);
     });
 } else {
-  // ── Launch mode ──────────────────────────────────────────────────────────────
-  // Open a headless browser, navigate to --url, and capture.
-  //
-  //   node dist/index.js --url https://earth.google.com/web/ --duration 60
   const url = getArg("url");
   sessionUrl = url;
   runSession({ url, duration, interval, dispatcher, logger })
     .then(finalize)
     .catch((err: unknown) => {
-      console.error("[mnemon] Error:", (err as Error).message);
+      logger.error(`Error: ${(err as Error).message}`);
       process.exit(1);
     });
 }
