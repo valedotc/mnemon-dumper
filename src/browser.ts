@@ -46,6 +46,15 @@ async function setupContextCDP(
     }
   });
 
+  // Forward console output from this context so hook diagnostics are visible.
+  cdpSession.on("Runtime.consoleAPICalled", (event) => {
+    const text = event.args
+      .map((a) => String(a.value ?? a.description ?? ""))
+      .join(" ");
+    const prefix = event.type === "error" ? "ERR" : "LOG";
+    console.log(`[mnemon] [${label}] [${prefix}] ${text}`);
+  });
+
   try {
     await cdpSession.send("Runtime.evaluate", { expression: hookScript });
   } catch {
@@ -93,6 +102,16 @@ async function hookPage(
     } else if (event.name === "saveMetadata") {
       dispatcher.handleMetadata(event.payload);
     }
+  });
+
+  // Forward main-page console output so hook diagnostics are visible.
+  page.on("console", (msg) => {
+    const text = msg.text();
+    if (!text.startsWith("[mnemon]")) return;
+    console.log(`[mnemon] [page] ${text}`);
+  });
+  page.on("pageerror", (err) => {
+    console.log(`[mnemon] [page] [ERR] ${String(err)}`);
   });
 
   page.on("workercreated", async (worker: WebWorker) => {
@@ -241,7 +260,7 @@ export async function runSession(config: SessionConfig): Promise<void> {
     args: ["--no-sandbox"],
   });
 
-  const hookScript = getHookScript(config.interval);
+  const hookScript = getHookScript(config.interval, 0);
   const seenUrls = new Set<string>();
 
   hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
@@ -280,7 +299,7 @@ export async function runAttachSession(config: AttachConfig): Promise<void> {
 
   const browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
 
-  const hookScript = getHookScript(config.interval);
+  const hookScript = getHookScript(config.interval, 0);
   const seenUrls = new Set<string>();
 
   hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
