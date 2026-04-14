@@ -26,8 +26,10 @@ const WASM_WITH_MEMORY = Buffer.from([
   0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
 ]);
 
-const HTML_WITH_MEMORY = `<!DOCTYPE html><html><head><title>mnemon test</title></head><body>
-<script>
+// Worker script that loads WASM and writes to memory on an interval.
+// Using a dedicated worker mirrors real-world usage (mining scripts, Google Earth)
+// and exercises the workercreated → setupContextCDP path instead of page-level bindings.
+const WORKER_SCRIPT = `
 WebAssembly.instantiateStreaming(fetch('/wasm/test.wasm'))
   .then(function(result) {
     var mem = new Uint8Array(result.instance.exports.memory.buffer);
@@ -35,6 +37,11 @@ WebAssembly.instantiateStreaming(fetch('/wasm/test.wasm'))
     setInterval(function() { mem[0] = (++i) & 0xff; }, 100);
   })
   .catch(function(e) { console.error('WASM load error', e); });
+`;
+
+const HTML_WITH_MEMORY = `<!DOCTYPE html><html><head><title>mnemon test</title></head><body>
+<script>
+new Worker('/worker.js');
 </script>
 </body></html>`;
 
@@ -44,6 +51,9 @@ function startServer(): Promise<{ port: number; close(): Promise<void> }> {
       if (req.url === "/wasm/test.wasm") {
         res.writeHead(200, { "Content-Type": "application/wasm" });
         res.end(WASM_WITH_MEMORY);
+      } else if (req.url === "/worker.js") {
+        res.writeHead(200, { "Content-Type": "application/javascript" });
+        res.end(WORKER_SCRIPT);
       } else {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(HTML_WITH_MEMORY);

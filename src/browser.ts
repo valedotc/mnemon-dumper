@@ -103,18 +103,6 @@ async function hookPage(
     flatten: true,
   });
 
-  await cdp.send("Runtime.addBinding", { name: "saveSnapshot" });
-  await cdp.send("Runtime.addBinding", { name: "saveMetadata" });
-  await cdp.send("Runtime.enable");
-  cdp.on("Runtime.bindingCalled", (event) => {
-    logger.vvv(`CDP binding called (page): ${event.name} payload[:100]: ${event.payload.slice(0, 100)}`);
-    if (event.name === "saveSnapshot") {
-      dispatcher.handleSnapshot(event.payload);
-    } else if (event.name === "saveMetadata") {
-      dispatcher.handleMetadata(event.payload);
-    }
-  });
-
   // Forward main-page console output so hook diagnostics are visible at -v.
   page.on("console", (msg) => {
     const text = msg.text();
