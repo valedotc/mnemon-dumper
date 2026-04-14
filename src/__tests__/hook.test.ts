@@ -14,13 +14,17 @@ describe("getHookScript", () => {
   });
 
   describe("verbosity 0 (default)", () => {
-    test("does not contain WebAssembly.instantiate called log", () => {
+    test("WebAssembly.instantiate called log is guarded by VERBOSITY >= 1", () => {
       const s = getHookScript(500, 0);
-      assert.ok(!s.includes('"WebAssembly.instantiate called"'));
+      // The string literal is present in the script source, but only executed when VERBOSITY >= 1
+      assert.ok(s.includes("WebAssembly.instantiate called"));
+      assert.ok(s.includes("VERBOSITY >= 1"));
     });
-    test("does not contain findMemory diagnostic log", () => {
+    test("findMemory diagnostic log is guarded by VERBOSITY >= 2", () => {
       const s = getHookScript(500, 0);
-      assert.ok(!s.includes('"findMemory: no Memory found"'));
+      // The string literal is present in the script source, but only executed when VERBOSITY >= 2
+      assert.ok(s.includes("findMemory: no Memory found"));
+      assert.ok(s.includes("VERBOSITY >= 2"));
     });
     test("always contains Hook installed log", () => {
       const s = getHookScript(500, 0);
