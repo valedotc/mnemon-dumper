@@ -40,8 +40,12 @@ describe("getHookScript", () => {
     });
     test("does not unconditionally log findMemory diagnostics", () => {
       const s = getHookScript(500, 1);
-      // findMemory diagnostic requires VERBOSITY >= 2
-      assert.ok(!s.match(/console\.log\("[mnemon] findMemory/));
+      // findMemory diagnostic is present in the source but must be guarded by VERBOSITY >= 2
+      const findMemoryLogIdx = s.indexOf('console.log("[mnemon] findMemory');
+      const verbosityGuardIdx = s.indexOf("VERBOSITY >= 2");
+      assert.ok(findMemoryLogIdx > -1, "findMemory log should be present in script source");
+      assert.ok(verbosityGuardIdx > -1, "VERBOSITY >= 2 guard should be present");
+      assert.ok(verbosityGuardIdx < findMemoryLogIdx, "findMemory log must appear after VERBOSITY >= 2 guard");
     });
   });
 

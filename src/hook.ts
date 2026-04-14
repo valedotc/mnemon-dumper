@@ -34,14 +34,11 @@ export function getHookScript(intervalMs: number, verbosity: LogLevel): string {
               return k + ":{" + Object.keys(v).join(",") + "}";
             }).join(" | ");
             console.log("[mnemon] findMemory: no Memory found. importObject shape: " + shape);
-            if (VERBOSITY >= 3) {
-              console.log("[mnemon] findMemory: exports: " + Object.keys(instance.exports || {}).join(","));
-            }
           } else {
             console.log("[mnemon] findMemory: no Memory found. importObject is null/undefined");
-            if (VERBOSITY >= 3) {
-              console.log("[mnemon] findMemory: exports: " + Object.keys(instance.exports || {}).join(","));
-            }
+          }
+          if (VERBOSITY >= 3) {
+            console.log("[mnemon] findMemory: exports: " + Object.keys(instance.exports || {}).join(","));
           }
         }
         return null;
