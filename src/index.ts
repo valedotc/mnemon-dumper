@@ -4,6 +4,7 @@
 import { extname } from "node:path";
 import { runSession, runAttachSession } from "./browser.js";
 import { Dispatcher, type ActiveExtractor } from "./dispatcher.js";
+import { Logger } from "./logger.js";
 import { EntropyExtractor } from "./extractors/entropy.js";
 import { StringsExtractor } from "./extractors/strings.js";
 import { TimelineExtractor } from "./extractors/timeline.js";
@@ -148,6 +149,7 @@ function resolveOutputPath(): string {
 
 const outputPath = resolveOutputPath();
 const dispatcher = new Dispatcher(activeExtractors, metadataExtractor);
+const logger = new Logger(0);
 const startTimestamp = Date.now();
 let sessionUrl = "";
 
@@ -192,7 +194,7 @@ if (hasFlag("port")) {
   //   node dist/index.js --port 9222 --duration 60 --interval 1000
   const port = Number(getArg("port", "9222"));
   sessionUrl = `attach:${port}`;
-  runAttachSession({ port, duration, interval, dispatcher })
+  runAttachSession({ port, duration, interval, dispatcher, logger })
     .then(finalize)
     .catch((err: unknown) => {
       console.error("[mnemon] Error:", (err as Error).message);
@@ -205,7 +207,7 @@ if (hasFlag("port")) {
   //   node dist/index.js --url https://earth.google.com/web/ --duration 60
   const url = getArg("url");
   sessionUrl = url;
-  runSession({ url, duration, interval, dispatcher })
+  runSession({ url, duration, interval, dispatcher, logger })
     .then(finalize)
     .catch((err: unknown) => {
       console.error("[mnemon] Error:", (err as Error).message);

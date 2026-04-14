@@ -5,12 +5,14 @@ import puppeteer, { TargetType } from "puppeteer";
 import type { Browser, CDPSession, Page, WebWorker, Target } from "puppeteer";
 import { getHookScript } from "./hook.js";
 import { Dispatcher } from "./dispatcher.js";
+import { type Logger, SILENT } from "./logger.js";
 
 export interface SessionConfig {
   url: string;
   duration: number;
   interval: number;
   dispatcher: Dispatcher;
+  logger: Logger;
 }
 
 export interface AttachConfig {
@@ -18,6 +20,7 @@ export interface AttachConfig {
   duration: number;
   interval: number;
   dispatcher: Dispatcher;
+  logger: Logger;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -33,12 +36,17 @@ async function setupContextCDP(
   hookScript: string,
   dispatcher: Dispatcher,
   label: string,
+  logger: Logger,
 ): Promise<void> {
   await cdpSession.send("Runtime.addBinding", { name: "saveSnapshot" });
+  logger.vv(`binding saveSnapshot registered for ${label}`);
   await cdpSession.send("Runtime.addBinding", { name: "saveMetadata" });
+  logger.vv(`binding saveMetadata registered for ${label}`);
   await cdpSession.send("Runtime.enable");
+  logger.vv(`Runtime enabled for ${label}`);
 
   cdpSession.on("Runtime.bindingCalled", (event) => {
+    logger.vvv(`CDP binding called: ${event.name} payload[:100]: ${event.payload.slice(0, 100)}`);
     if (event.name === "saveSnapshot") {
       dispatcher.handleSnapshot(event.payload);
     } else if (event.name === "saveMetadata") {
@@ -46,17 +54,18 @@ async function setupContextCDP(
     }
   });
 
-  // Forward console output from this context so hook diagnostics are visible.
+  // Forward console output from this context so hook diagnostics are visible at -v.
   cdpSession.on("Runtime.consoleAPICalled", (event) => {
     const text = event.args
       .map((a) => String(a.value ?? a.description ?? ""))
       .join(" ");
     const prefix = event.type === "error" ? "ERR" : "LOG";
-    console.log(`[mnemon] [${label}] [${prefix}] ${text}`);
+    logger.v(`[${label}] [${prefix}] ${text}`);
   });
 
   try {
     await cdpSession.send("Runtime.evaluate", { expression: hookScript });
+    logger.vv(`hook script evaluated for ${label}`);
   } catch {
     // Context closed before injection — ignore.
   }
@@ -65,9 +74,10 @@ async function setupContextCDP(
   // Must run AFTER hook injection so WASM APIs are already patched.
   try {
     await cdpSession.send("Runtime.runIfWaitingForDebugger");
+    logger.vv(`debugger resumed for ${label}`);
   } catch {}
 
-  console.log(`[mnemon] Hook injected into ${label}`);
+  logger.info(`Hook injected into ${label}`);
 }
 
 /**
@@ -75,19 +85,18 @@ async function setupContextCDP(
  * - Registers the saveSnapshot binding on the main-frame CDP session.
  * - Sets waitForDebuggerOnStart so dedicated workers start paused.
  * - Hooks workercreated to inject into each worker before it runs.
- * - Returns the page-level CDPSession.
  */
 async function hookPage(
   page: Page,
   hookScript: string,
   dispatcher: Dispatcher,
   injectNow: boolean,
+  logger: Logger,
 ): Promise<void> {
   const cdp = await page.createCDPSession();
 
   // Pause dedicated workers on start so the hook is guaranteed to be injected
   // before any worker script executes (and before WebAssembly.instantiate runs).
-  // setupContextCDP ends with Runtime.runIfWaitingForDebugger to resume them.
   await cdp.send("Target.setAutoAttach", {
     autoAttach: true,
     waitForDebuggerOnStart: true,
@@ -97,6 +106,7 @@ async function hookPage(
   await cdp.send("Runtime.addBinding", { name: "saveSnapshot" });
   await cdp.send("Runtime.addBinding", { name: "saveMetadata" });
   cdp.on("Runtime.bindingCalled", (event) => {
+    logger.vvv(`CDP binding called (page): ${event.name} payload[:100]: ${event.payload.slice(0, 100)}`);
     if (event.name === "saveSnapshot") {
       dispatcher.handleSnapshot(event.payload);
     } else if (event.name === "saveMetadata") {
@@ -104,23 +114,23 @@ async function hookPage(
     }
   });
 
-  // Forward main-page console output so hook diagnostics are visible.
+  // Forward main-page console output so hook diagnostics are visible at -v.
   page.on("console", (msg) => {
     const text = msg.text();
     if (!text.startsWith("[mnemon]")) return;
-    console.log(`[mnemon] [page] ${text}`);
+    logger.v(`[page] ${text}`);
   });
   page.on("pageerror", (err) => {
-    console.log(`[mnemon] [page] [ERR] ${String(err)}`);
+    logger.v(`[page] [ERR] ${String(err)}`);
   });
 
   page.on("workercreated", async (worker: WebWorker) => {
     const label = `worker ${worker.url().slice(0, 80)}`;
-    console.log(`[mnemon] New target: ${label}`);
+    logger.info(`New target: ${label}`);
     try {
-      await setupContextCDP(worker.client, hookScript, dispatcher, label);
+      await setupContextCDP(worker.client, hookScript, dispatcher, label, logger);
     } catch (err) {
-      console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
+      logger.warn(`Could not attach to ${label}: ${err}`);
     }
   });
 
@@ -133,11 +143,11 @@ async function hookPage(
     const existingWorkers = page.workers();
     for (const worker of existingWorkers) {
       const label = `worker ${worker.url().slice(0, 80)} [existing]`;
-      console.log(`[mnemon] Existing target: ${label}`);
+      logger.info(`Existing target: ${label}`);
       try {
-        await setupContextCDP(worker.client, hookScript, dispatcher, label);
+        await setupContextCDP(worker.client, hookScript, dispatcher, label, logger);
       } catch (err) {
-        console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
+        logger.warn(`Could not attach to ${label}: ${err}`);
       }
     }
   } else {
@@ -155,6 +165,7 @@ function hookServiceWorkers(
   hookScript: string,
   dispatcher: Dispatcher,
   seenUrls: Set<string>,
+  logger: Logger,
 ): void {
   browser.on("targetcreated", async (target: Target) => {
     if (target.type() !== TargetType.SERVICE_WORKER) return;
@@ -162,26 +173,25 @@ function hookServiceWorkers(
     seenUrls.add(target.url());
 
     const label = `service_worker ${target.url().slice(0, 80)}`;
-    console.log(`[mnemon] New target: ${label}`);
+    logger.info(`New target: ${label}`);
     try {
       const swCDP = await target.createCDPSession();
-      await setupContextCDP(swCDP, hookScript, dispatcher, label);
+      await setupContextCDP(swCDP, hookScript, dispatcher, label, logger);
     } catch (err) {
-      console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
+      logger.warn(`Could not attach to ${label}: ${err}`);
     }
   });
 }
 
 /**
  * Scans already-known service-worker targets after navigation and injects.
- * targetcreated can fire late (only when the CDP stream is flushed), so this
- * proactive scan is the only reliable way to catch SWs registered at load.
  */
 async function scanExistingServiceWorkers(
   browser: Browser,
   hookScript: string,
   dispatcher: Dispatcher,
   seenUrls: Set<string>,
+  logger: Logger,
 ): Promise<void> {
   for (const target of browser.targets()) {
     if (target.type() !== TargetType.SERVICE_WORKER) continue;
@@ -189,12 +199,12 @@ async function scanExistingServiceWorkers(
     seenUrls.add(target.url());
 
     const label = `service_worker ${target.url().slice(0, 80)} [existing]`;
-    console.log(`[mnemon] Existing target: ${label}`);
+    logger.info(`Existing target: ${label}`);
     try {
       const swCDP = await target.createCDPSession();
-      await setupContextCDP(swCDP, hookScript, dispatcher, label);
+      await setupContextCDP(swCDP, hookScript, dispatcher, label, logger);
     } catch (err) {
-      console.warn(`[mnemon] Could not attach to ${label}: ${err}`);
+      logger.warn(`Could not attach to ${label}: ${err}`);
     }
   }
 }
@@ -255,26 +265,27 @@ export function makeSessionId(): string {
  * captures WASM memory snapshots for the configured duration.
  */
 export async function runSession(config: SessionConfig): Promise<void> {
+  const logger = config.logger ?? SILENT;
   const browser = await puppeteer.launch({
     headless: true,
     args: ["--no-sandbox"],
   });
 
-  const hookScript = getHookScript(config.interval, 0);
+  const hookScript = getHookScript(config.interval, logger.level);
   const seenUrls = new Set<string>();
 
-  hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
+  hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls, logger);
 
   const page = await browser.newPage();
-  await hookPage(page, hookScript, config.dispatcher, /* injectNow */ false);
+  await hookPage(page, hookScript, config.dispatcher, /* injectNow */ false, logger);
 
-  console.log(`[mnemon] Navigating to ${config.url}`);
-  console.log(`[mnemon] Duration: ${config.duration / 1000}s, Interval: ${config.interval}ms`);
+  logger.info(`Navigating to ${config.url}`);
+  logger.info(`Duration: ${config.duration / 1000}s, Interval: ${config.interval}ms`);
 
   // waitUntil "load" so service workers registered after DOMContentLoaded
   // are already alive when we do the proactive scan below.
   await page.goto(config.url, { waitUntil: "load", timeout: 60_000 });
-  await scanExistingServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
+  await scanExistingServiceWorkers(browser, hookScript, config.dispatcher, seenUrls, logger);
 
   await new Promise((resolve) => setTimeout(resolve, config.duration));
 
@@ -287,32 +298,28 @@ export async function runSession(config: SessionConfig): Promise<void> {
  * Attach mode: connects to an already-running Chrome instance via its remote
  * debugging port, injects hooks into every open page and worker, and captures
  * WASM memory snapshots for the configured duration.
- *
- * Start Chrome with:
- *   --remote-debugging-port=<port>
- *
- * Then browse normally — mnemon will intercept WASM on every tab you visit.
  */
 export async function runAttachSession(config: AttachConfig): Promise<void> {
+  const logger = config.logger ?? SILENT;
   const wsEndpoint = await getWsEndpoint(config.port);
-  console.log(`[mnemon] Connecting to Chrome on port ${config.port}`);
+  logger.info(`Connecting to Chrome on port ${config.port}`);
 
   const browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
 
-  const hookScript = getHookScript(config.interval, 0);
+  const hookScript = getHookScript(config.interval, logger.level);
   const seenUrls = new Set<string>();
 
-  hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
-  await scanExistingServiceWorkers(browser, hookScript, config.dispatcher, seenUrls);
+  hookServiceWorkers(browser, hookScript, config.dispatcher, seenUrls, logger);
+  await scanExistingServiceWorkers(browser, hookScript, config.dispatcher, seenUrls, logger);
 
   // Hook all pages already open.
   const pages = await browser.pages();
-  console.log(`[mnemon] Found ${pages.length} open page(s)`);
+  logger.info(`Found ${pages.length} open page(s)`);
   for (const page of pages) {
     const url = page.url();
     if (!url || url === "about:blank") continue;
-    console.log(`[mnemon] Hooking page: ${url.slice(0, 80)}`);
-    await hookPage(page, hookScript, config.dispatcher, /* injectNow */ true);
+    logger.info(`Hooking page: ${url.slice(0, 80)}`);
+    await hookPage(page, hookScript, config.dispatcher, /* injectNow */ true, logger);
   }
 
   // Hook new pages as the user opens them.
@@ -324,18 +331,18 @@ export async function runAttachSession(config: AttachConfig): Promise<void> {
     // evaluateOnNewDocument ensures the hook runs before any page script on
     // subsequent navigations within this tab.
     await newPage.evaluateOnNewDocument(hookScript);
-    await hookPage(newPage, hookScript, config.dispatcher, /* injectNow */ false);
+    await hookPage(newPage, hookScript, config.dispatcher, /* injectNow */ false, logger);
 
     newPage.on("framenavigated", async (frame) => {
       if (frame !== newPage.mainFrame()) return;
       const url = newPage.url();
       if (!url || url === "about:blank") return;
-      console.log(`[mnemon] New page: ${url.slice(0, 80)}`);
+      logger.info(`New page: ${url.slice(0, 80)}`);
     });
   });
 
-  console.log(`[mnemon] Attached — capturing for ${config.duration / 1000}s`);
-  console.log(`[mnemon] Browse normally; WASM memory will be captured automatically.`);
+  logger.info(`Attached — capturing for ${config.duration / 1000}s`);
+  logger.info(`Browse normally; WASM memory will be captured automatically.`);
 
   await new Promise((resolve) => setTimeout(resolve, config.duration));
 
