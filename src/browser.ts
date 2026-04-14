@@ -105,6 +105,7 @@ async function hookPage(
 
   await cdp.send("Runtime.addBinding", { name: "saveSnapshot" });
   await cdp.send("Runtime.addBinding", { name: "saveMetadata" });
+  await cdp.send("Runtime.enable");
   cdp.on("Runtime.bindingCalled", (event) => {
     logger.vvv(`CDP binding called (page): ${event.name} payload[:100]: ${event.payload.slice(0, 100)}`);
     if (event.name === "saveSnapshot") {
