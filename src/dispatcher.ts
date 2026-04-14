@@ -37,8 +37,11 @@ interface PendingSnapshot {
  * SharedArrayBuffer snapshots by fingerprint, and fans out to all extractors.
  */
 export class Dispatcher {
-  // Pending multi-batch snapshots keyed by "workerIndex:snapshotIndex"
+  // Pending multi-batch snapshots keyed by "index:timestamp:totalByteLength"
   private pending = new Map<string, PendingSnapshot>();
+
+  // Keys rejected due to shared-memory base-snapshot deduplication
+  private rejectedKeys = new Set<string>();
 
   // fingerprint → seq: dedup for workers sharing the same WebAssembly.Memory
   private fingerprints = new Map<string, number>();
@@ -66,8 +69,27 @@ export class Dispatcher {
 
     // Multi-batch: accumulate until all pieces arrive
     const key = `${data.index}:${data.timestamp}:${data.totalByteLength}`;
+
+    // Skip keys already rejected (duplicate base snapshots from shared memory)
+    if (this.rejectedKeys.has(key)) return;
+
     let pending = this.pending.get(key);
     if (!pending) {
+      // For base snapshots: if we're already accumulating one of the same size,
+      // this is the same shared memory fired from a different context (page vs
+      // worker). Reject all batches for this key to avoid buffering N copies.
+      if (data.isBase) {
+        const alreadyAccumulating = [...this.pending.values()].some(
+          (p) => p.meta.isBase && p.meta.totalByteLength === data.totalByteLength,
+        );
+        if (alreadyAccumulating) {
+          this.rejectedKeys.add(key);
+          this.logger.vv(
+            `dedup: dropping duplicate base snapshot (${Math.round(data.totalByteLength / 1024 / 1024)}MB, shared memory)`,
+          );
+          return;
+        }
+      }
       pending = {
         meta: {
           index:           data.index,
@@ -81,6 +103,9 @@ export class Dispatcher {
       };
       this.pending.set(key, pending);
     }
+
+    // Don't overwrite an already-received batch (extra copies from same context)
+    if (pending.received.has(data.batchIndex)) return;
     pending.received.set(data.batchIndex, data.chunks);
 
     this.logger.vv(
@@ -96,6 +121,16 @@ export class Dispatcher {
       if (batch) allChunks.push(...batch);
     }
     this.pending.delete(key);
+
+    // Prune stale rejected keys older than 5 s to keep the set bounded
+    if (this.rejectedKeys.size > 0) {
+      const cutoff = data.timestamp - 5000;
+      for (const rk of this.rejectedKeys) {
+        const ts = Number(rk.split(":")[1]);
+        if (!isNaN(ts) && ts < cutoff) this.rejectedKeys.delete(rk);
+      }
+    }
+
     this.dispatch(pending.meta as RawSnapshotData, allChunks);
   }
 
