@@ -18,6 +18,14 @@ function captureWarn(fn: () => void): string[] {
   return out;
 }
 
+function captureError(fn: () => void): string[] {
+  const out: string[] = [];
+  const orig = console.error;
+  console.error = (msg: string) => out.push(msg);
+  try { fn(); } finally { console.error = orig; }
+  return out;
+}
+
 describe("Logger", () => {
   describe("info/warn/error always emit", () => {
     test("info emits at level 0", () => {
@@ -28,6 +36,11 @@ describe("Logger", () => {
     test("warn emits at level 0", () => {
       const msgs = captureWarn(() => new Logger(0).warn("oops"));
       assert.ok(msgs.some(m => m.includes("oops")));
+    });
+
+    test("error emits at level 0", () => {
+      const msgs = captureError(() => new Logger(0).error("boom"));
+      assert.ok(msgs.some(m => m.includes("boom")));
     });
   });
 
