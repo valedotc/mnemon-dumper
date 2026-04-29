@@ -19,7 +19,7 @@ import {
   SECTION_RAWPAGES,
 } from "./writer/format.js";
 
-const PKG_VERSION = "1.2.0";
+const PKG_VERSION = "1.3.0";
 
 const VALID_MODULES = ["entropy", "strings", "timeline", "metadata", "rawpages"] as const;
 
@@ -58,8 +58,6 @@ EXAMPLES
 // ── Completion scripts ────────────────────────────────────────────────────────
 
 const ZSH_COMPLETION = `\
-#compdef mnemon
-
 _mnemon() {
   _arguments -s \\
     '--url[Target URL (launch mode)]:url:' \\
@@ -76,8 +74,7 @@ _mnemon() {
     '--help[Print help and exit]' \\
     '--completion[Print shell completion script]:shell:(zsh bash)'
 }
-
-_mnemon`;
+compdef _mnemon mnemon`;
 
 const BASH_COMPLETION = `\
 _mnemon_completion() {
