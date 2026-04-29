@@ -21,6 +21,8 @@ import {
 
 const PKG_VERSION = "1.2.0";
 
+const VALID_MODULES = ["entropy", "strings", "timeline", "metadata", "rawpages"] as const;
+
 const USAGE = `
 mnemon v${PKG_VERSION} — WebAssembly linear memory capture tool
 
@@ -34,7 +36,7 @@ OPTIONS
   --duration <s>       Capture duration in seconds          (default: 60)
   --interval <ms>      Snapshot interval in milliseconds    (default: 1000)
   --modules <list>     Comma-separated extractors to enable (default: entropy,strings,timeline,metadata)
-                       Available: entropy, strings, timeline, metadata, rawpages
+                       Available: ${VALID_MODULES.join(", ")}
   --max-rawpages-mb N  Stop rawpages capture after N MB of data (no limit by default)
   -o <path>            Output file path                     (default: ./session.mnem)
                        .mnem extension is added automatically if omitted
@@ -43,13 +45,64 @@ OPTIONS
   -vvv                 Most verbose: raw CDP payloads, chunk lists, importObject shapes
   --version, -V        Print version and exit
   --help,    -h        Print this help and exit
+  --completion <shell> Print shell completion script (zsh or bash)
 
 EXAMPLES
   mnemon --url https://example.com --duration 120 --interval 500
   mnemon --url https://example.com -vv
   mnemon --port 9222 --duration 60 -o captures/earth-test
   mnemon --url https://example.com --modules entropy,timeline
+  mnemon --url https://example.com --modules entropy,strings,timeline,metadata,rawpages --max-rawpages-mb 500
 `.trimStart();
+
+// ── Completion scripts ────────────────────────────────────────────────────────
+
+const ZSH_COMPLETION = `\
+#compdef mnemon
+
+_mnemon() {
+  _arguments -s \\
+    '--url[Target URL (launch mode)]:url:' \\
+    '--port[Remote debugging port (attach mode)]:port:' \\
+    '--duration[Capture duration in seconds]:seconds:' \\
+    '--interval[Snapshot interval in milliseconds]:ms:' \\
+    '--modules[Comma-separated extractors]:modules:(entropy strings timeline metadata rawpages)' \\
+    '--max-rawpages-mb[Stop rawpages capture after N MB]:mb:' \\
+    '-o[Output file path]:file:_files' \\
+    '-v[Verbose]' \\
+    '-vv[More verbose]' \\
+    '-vvv[Most verbose]' \\
+    '--version[Print version and exit]' \\
+    '--help[Print help and exit]' \\
+    '--completion[Print shell completion script]:shell:(zsh bash)'
+}
+
+_mnemon`;
+
+const BASH_COMPLETION = `\
+_mnemon_completion() {
+  local cur prev
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+
+  case "$prev" in
+    --modules)
+      COMPREPLY=(\$(compgen -W "entropy strings timeline metadata rawpages" -- "$cur"))
+      return 0 ;;
+    --completion)
+      COMPREPLY=(\$(compgen -W "zsh bash" -- "$cur"))
+      return 0 ;;
+    -o)
+      COMPREPLY=(\$(compgen -f -- "$cur"))
+      return 0 ;;
+  esac
+
+  COMPREPLY=(\$(compgen -W "--url --port --duration --interval --modules --max-rawpages-mb -o -v -vv -vvv --version --help --completion" -- "$cur"))
+}
+
+complete -F _mnemon_completion mnemon`;
+
+// ── Arg parsing helpers ───────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 
@@ -60,6 +113,20 @@ if (args.includes("--help") || args.includes("-h")) {
 
 if (args.includes("--version") || args.includes("-V")) {
   process.stdout.write(`mnemon ${PKG_VERSION}\n`);
+  process.exit(0);
+}
+
+if (args.includes("--completion")) {
+  const idx = args.indexOf("--completion");
+  const shell = args[idx + 1] ?? "zsh";
+  if (shell === "zsh") {
+    process.stdout.write(ZSH_COMPLETION + "\n");
+  } else if (shell === "bash") {
+    process.stdout.write(BASH_COMPLETION + "\n");
+  } else {
+    console.error(`[mnemon] Unknown shell: "${shell}". Supported: zsh, bash`);
+    process.exit(1);
+  }
   process.exit(0);
 }
 
@@ -87,10 +154,15 @@ function parsePositiveNumber(raw: string, argName: string): number {
   return n;
 }
 
-/**
- * Count verbosity level from -v / -vv / -vvv flags.
- * A single token "-vvv" counts as 3. Repeated "-v -v -v" also counts as 3. Capped at 3.
- */
+function parsePositiveInt(raw: string, argName: string): number {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    console.error(`[mnemon] --${argName} must be a positive integer (got: ${raw})`);
+    process.exit(1);
+  }
+  return n;
+}
+
 function parseVerbosity(): 0 | 1 | 2 | 3 {
   let level = 0;
   for (const arg of args) {
@@ -101,22 +173,82 @@ function parseVerbosity(): 0 | 1 | 2 | 3 {
   return Math.min(level, 3) as 0 | 1 | 2 | 3;
 }
 
+// ── Validate mode (--url xor --port) ─────────────────────────────────────────
+
+const hasUrl  = hasFlag("url");
+const hasPort = hasFlag("port");
+
+if (hasUrl && hasPort) {
+  console.error("[mnemon] --url and --port are mutually exclusive.");
+  console.error("[mnemon] Use --url to launch a headless browser, --port to attach to a running one.");
+  process.exit(1);
+}
+if (!hasUrl && !hasPort) {
+  console.error("[mnemon] Either --url or --port is required.");
+  console.error("[mnemon] Run `mnemon --help` for usage.");
+  process.exit(1);
+}
+
+// ── Parse and validate arguments ─────────────────────────────────────────────
+
 const verbosity = parseVerbosity();
 const logger = new Logger(verbosity);
 
 const duration = parsePositiveNumber(getArg("duration", "60"), "duration") * 1000;
-const interval = parsePositiveNumber(getArg("interval", "1000"), "interval");
 
-const rawMaxMBRaw = args.indexOf("--max-rawpages-mb") !== -1
-  ? getArg("max-rawpages-mb")
-  : undefined;
+const interval = parsePositiveNumber(getArg("interval", "1000"), "interval");
+if (interval < 100) {
+  console.error(`[mnemon] --interval must be at least 100ms (got: ${interval})`);
+  process.exit(1);
+}
+
+const rawMaxMBRaw = hasFlag("max-rawpages-mb") ? getArg("max-rawpages-mb") : undefined;
 const rawpagesMaxMB = rawMaxMBRaw !== undefined
-  ? parsePositiveNumber(rawMaxMBRaw, "max-rawpages-mb")
+  ? parsePositiveInt(rawMaxMBRaw, "max-rawpages-mb")
   : undefined;
+
 const modules = getArg("modules", "entropy,strings,timeline,metadata")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+
+// Validate module names
+for (const mod of modules) {
+  if (!(VALID_MODULES as readonly string[]).includes(mod)) {
+    console.error(`[mnemon] Unknown module: "${mod}"`);
+    console.error(`[mnemon] Available modules: ${VALID_MODULES.join(", ")}`);
+    process.exit(1);
+  }
+}
+
+// Warn if --max-rawpages-mb is given but rawpages is not active
+if (rawpagesMaxMB !== undefined && !modules.includes("rawpages")) {
+  logger.warn(`--max-rawpages-mb has no effect without "rawpages" in --modules`);
+}
+
+// Validate URL or port
+if (hasUrl) {
+  const rawUrl = getArg("url");
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      console.error(`[mnemon] --url must use http:// or https:// (got: ${rawUrl})`);
+      process.exit(1);
+    }
+  } catch {
+    console.error(`[mnemon] --url is not a valid URL: ${rawUrl}`);
+    process.exit(1);
+  }
+}
+
+if (hasPort) {
+  const rawPort = getArg("port", "9222");
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`[mnemon] --port must be an integer between 1 and 65535 (got: ${rawPort})`);
+    process.exit(1);
+  }
+}
 
 // ── Build extractor list ──────────────────────────────────────────────────────
 
@@ -162,14 +294,10 @@ for (const mod of modules) {
         }),
       });
       break;
-    default:
-      logger.warn(`Unknown module: ${mod}`);
   }
 }
 
 // ── Resolve output filepath ───────────────────────────────────────────────────
-// -o <path>  explicit path; .mnem extension added if omitted
-// (default)  ./session.mnem
 
 function resolveOutputPath(): string {
   const idx = args.indexOf("-o");
@@ -207,7 +335,7 @@ async function finalize(): Promise<void> {
   logger.info("Done");
 }
 
-if (hasFlag("port")) {
+if (hasPort) {
   const port = Number(getArg("port", "9222"));
   sessionUrl = `attach:${port}`;
   runAttachSession({ port, duration, interval, dispatcher, logger })
