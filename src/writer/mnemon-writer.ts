@@ -1,6 +1,7 @@
 // writer/mnemon-writer.ts
 
 import { open, mkdir } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   MAGIC,
@@ -11,11 +12,19 @@ import {
 
 export interface SectionData {
   sectionId: number;
-  data: Buffer;
+  data: Buffer | null;
+  // Streaming alternative for sections that exceed the 2GB Buffer limit.
+  // Called instead of writing data; must return bytes written.
+  writeStream?: (fh: FileHandle) => Promise<number>;
 }
 
 /**
  * Writes a .mnem binary file to the given filepath.
+ *
+ * Sections may supply either a pre-built Buffer via `data` or a streaming
+ * callback via `writeStream` (used by RawPagesExtractor to avoid the 2GB
+ * Buffer.concat limit). The two fields are mutually exclusive; `writeStream`
+ * takes precedence.
  *
  * Writing order:
  *   1. 16 zero bytes — placeholder header (position 0)
@@ -46,14 +55,21 @@ export async function writeMnemonFile(
       size: number;
     }> = [];
     let pos = HEADER_SIZE;
+
     for (const s of sections) {
-      tableEntries.push({
-        sectionId: s.sectionId,
-        offset: pos,
-        size: s.data.length,
-      });
-      await fh.write(s.data, 0, s.data.length, null);
-      pos += s.data.length;
+      const startPos = pos;
+      let size: number;
+
+      if (s.writeStream) {
+        size = await s.writeStream(fh);
+      } else {
+        const d = s.data!;
+        size = d.length;
+        await fh.write(d, 0, size, null);
+      }
+
+      tableEntries.push({ sectionId: s.sectionId, offset: startPos, size });
+      pos += size;
     }
 
     // 3. Section table at end of file

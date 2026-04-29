@@ -10,7 +10,7 @@ import { StringsExtractor } from "./extractors/strings.js";
 import { TimelineExtractor } from "./extractors/timeline.js";
 import { MetadataExtractor } from "./extractors/metadata.js";
 import { RawPagesExtractor } from "./extractors/rawpages.js";
-import { writeMnemonFile } from "./writer/mnemon-writer.js";
+import { writeMnemonFile, type SectionData } from "./writer/mnemon-writer.js";
 import {
   SECTION_ENTROPY,
   SECTION_STRINGS,
@@ -35,6 +35,7 @@ OPTIONS
   --interval <ms>      Snapshot interval in milliseconds    (default: 1000)
   --modules <list>     Comma-separated extractors to enable (default: entropy,strings,timeline,metadata)
                        Available: entropy, strings, timeline, metadata, rawpages
+  --max-rawpages-mb N  Stop rawpages capture after N MB of data (no limit by default)
   -o <path>            Output file path                     (default: ./session.mnem)
                        .mnem extension is added automatically if omitted
   -v                   Verbose: shallow progress (snapshot sizes, worker count)
@@ -105,6 +106,13 @@ const logger = new Logger(verbosity);
 
 const duration = parsePositiveNumber(getArg("duration", "60"), "duration") * 1000;
 const interval = parsePositiveNumber(getArg("interval", "1000"), "interval");
+
+const rawMaxMBRaw = args.indexOf("--max-rawpages-mb") !== -1
+  ? getArg("max-rawpages-mb")
+  : undefined;
+const rawpagesMaxMB = rawMaxMBRaw !== undefined
+  ? parsePositiveNumber(rawMaxMBRaw, "max-rawpages-mb")
+  : undefined;
 const modules = getArg("modules", "entropy,strings,timeline,metadata")
   .split(",")
   .map((s) => s.trim())
@@ -146,7 +154,12 @@ for (const mod of modules) {
     case "rawpages":
       activeExtractors.push({
         sectionId: SECTION_RAWPAGES,
-        extractor: new RawPagesExtractor(),
+        extractor: new RawPagesExtractor({
+          ...(rawpagesMaxMB !== undefined && { maxMB: rawpagesMaxMB }),
+          duration,
+          interval,
+          logger,
+        }),
       });
       break;
     default:
@@ -179,10 +192,16 @@ async function finalize(): Promise<void> {
   if (metadataExtractor) {
     metadataExtractor.setSessionInfo(sessionUrl, startTimestamp, Date.now());
   }
-  const sections = activeExtractors.map(({ sectionId, extractor }) => ({
-    sectionId,
-    data: extractor.finalize(),
-  }));
+  const sections: SectionData[] = activeExtractors.map(({ sectionId, extractor }) => {
+    if (extractor.finalizeToHandle) {
+      return {
+        sectionId,
+        data: null,
+        writeStream: (fh) => extractor.finalizeToHandle!(fh),
+      };
+    }
+    return { sectionId, data: extractor.finalize() };
+  });
   const filepath = await writeMnemonFile(outputPath, sections);
   logger.info(`Session saved to ${filepath}`);
   logger.info("Done");
